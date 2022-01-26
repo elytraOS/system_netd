@@ -36,9 +36,9 @@
 #include "DummyNetwork.h"
 #include "Fwmark.h"
 #include "LocalNetwork.h"
-#include "OffloadUtils.h"
 #include "PhysicalNetwork.h"
 #include "RouteController.h"
+#include "TcUtils.h"
 #include "UnreachableNetwork.h"
 #include "VirtualNetwork.h"
 #include "netdutils/DumpWriter.h"
@@ -768,6 +768,22 @@ void NetworkController::dump(DumpWriter& dw) {
     }
     dw.decIndent();
 
+    dw.blankline();
+    dw.println("Permission of users:");
+    dw.incIndent();
+    std::vector<uid_t> systemUids;
+    std::vector<uid_t> networkUids;
+    for (const auto& [uid, permission] : mUsers) {
+        if ((permission & PERMISSION_SYSTEM) == PERMISSION_SYSTEM) {
+            systemUids.push_back(uid);
+        } else if ((permission & PERMISSION_NETWORK) == PERMISSION_NETWORK) {
+            networkUids.push_back(uid);
+        }
+    }
+    dw.println("NETWORK: %s", android::base::Join(networkUids, ", ").c_str());
+    dw.println("SYSTEM: %s", android::base::Join(systemUids, ", ").c_str());
+    dw.decIndent();
+
     dw.decIndent();
 
     dw.decIndent();
@@ -897,11 +913,13 @@ int NetworkController::modifyRoute(unsigned netId, const char* interface, const 
 
     switch (op) {
         case ROUTE_ADD:
-            return RouteController::addRoute(interface, destination, nexthop, tableType, mtu);
+            return RouteController::addRoute(interface, destination, nexthop, tableType, mtu,
+                                             0 /* priority */);
         case ROUTE_UPDATE:
             return RouteController::updateRoute(interface, destination, nexthop, tableType, mtu);
         case ROUTE_REMOVE:
-            return RouteController::removeRoute(interface, destination, nexthop, tableType);
+            return RouteController::removeRoute(interface, destination, nexthop, tableType,
+                                                0 /* priority */);
     }
     return -EINVAL;
 }
