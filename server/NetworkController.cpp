@@ -42,11 +42,13 @@
 #include "UnreachableNetwork.h"
 #include "VirtualNetwork.h"
 #include "netdutils/DumpWriter.h"
+#include "netdutils/Utils.h"
 #include "netid_client.h"
 
 #define DBG 0
 
 using android::netdutils::DumpWriter;
+using android::netdutils::getIfaceNames;
 
 namespace android::net {
 
@@ -150,7 +152,7 @@ NetworkController::NetworkController() :
     // TODO: perhaps only remove the clsact on the interface which is added by
     // RouteController::addInterfaceToPhysicalNetwork. Currently, the netd only
     // attach the clsact to the interface for the physical network.
-    const auto& ifaces = InterfaceController::getIfaceNames();
+    const auto& ifaces = getIfaceNames();
     if (isOk(ifaces)) {
         for (const std::string& iface : ifaces.value()) {
             if (int ifIndex = if_nametoindex(iface.c_str())) {
@@ -437,7 +439,8 @@ int NetworkController::createPhysicalOemNetwork(Permission permission, unsigned 
     return ret;
 }
 
-int NetworkController::createVirtualNetwork(unsigned netId, bool secure, NativeVpnType vpnType) {
+int NetworkController::createVirtualNetwork(unsigned netId, bool secure, NativeVpnType vpnType,
+                                            bool excludeLocalRoutes) {
     ScopedWLock lock(mRWLock);
 
     if (!(MIN_NET_ID <= netId && netId <= MAX_NET_ID)) {
@@ -458,7 +461,7 @@ int NetworkController::createVirtualNetwork(unsigned netId, bool secure, NativeV
     if (int ret = modifyFallthroughLocked(netId, true)) {
         return ret;
     }
-    mNetworks[netId] = new VirtualNetwork(netId, secure);
+    mNetworks[netId] = new VirtualNetwork(netId, secure, excludeLocalRoutes);
     return 0;
 }
 
@@ -617,7 +620,7 @@ int isWrongNetworkForUidRanges(unsigned netId, Network* network) {
 }  // namespace
 
 int NetworkController::addUsersToNetwork(unsigned netId, const UidRanges& uidRanges,
-                                         uint32_t subPriority) {
+                                         int32_t subPriority) {
     ScopedWLock lock(mRWLock);
     Network* network = getNetworkLocked(netId);
     if (int ret = isWrongNetworkForUidRanges(netId, network)) {
@@ -627,7 +630,7 @@ int NetworkController::addUsersToNetwork(unsigned netId, const UidRanges& uidRan
 }
 
 int NetworkController::removeUsersFromNetwork(unsigned netId, const UidRanges& uidRanges,
-                                              uint32_t subPriority) {
+                                              int32_t subPriority) {
     ScopedWLock lock(mRWLock);
     Network* network = getNetworkLocked(netId);
     if (int ret = isWrongNetworkForUidRanges(netId, network)) {
@@ -799,7 +802,7 @@ Network* NetworkController::getNetworkLocked(unsigned netId) const {
 }
 
 VirtualNetwork* NetworkController::getVirtualNetworkForUserLocked(uid_t uid) const {
-    uint32_t subPriority;
+    int32_t subPriority;
     for (const auto& [_, network] : mNetworks) {
         if (network->isVirtual() && network->appliesToUser(uid, &subPriority)) {
             return static_cast<VirtualNetwork*>(network);
@@ -814,9 +817,9 @@ VirtualNetwork* NetworkController::getVirtualNetworkForUserLocked(uid_t uid) con
 // undefined. That is a configuration error.
 Network* NetworkController::getPhysicalOrUnreachableNetworkForUserLocked(uid_t uid) const {
     Network* bestNetwork = nullptr;
-    unsigned bestSubPriority = UidRanges::LOWEST_SUB_PRIORITY + 1;
+    int32_t bestSubPriority = UidRanges::LOWEST_SUB_PRIORITY + 1;
     for (const auto& [netId, network] : mNetworks) {
-        uint32_t subPriority;
+        int32_t subPriority;
         if (!network->isPhysical() && !network->isUnreachable()) continue;
         if (!network->appliesToUser(uid, &subPriority)) continue;
         if (subPriority < bestSubPriority) {
@@ -852,7 +855,7 @@ int NetworkController::checkUserNetworkAccessLocked(uid_t uid, unsigned netId) c
         return 0;
     }
     // If the UID wants to use a VPN, it can do so if and only if the VPN applies to the UID.
-    uint32_t subPriority;
+    int32_t subPriority;
     if (network->isVirtual()) {
         return network->appliesToUser(uid, &subPriority) ? 0 : -EPERM;
     }

@@ -28,7 +28,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "bpf_net_helpers.h"
-#include "netdbpf/bpf_shared.h"
+#include "bpf_shared.h"
 
 // This is defined for cgroup bpf filter only.
 #define BPF_DROP_UNLESS_DNS 2
@@ -48,23 +48,25 @@
 #define TCP_FLAG_OFF 13
 #define RST_OFFSET 2
 
-DEFINE_BPF_MAP_GRO(cookie_tag_map, HASH, uint64_t, UidTagValue, COOKIE_UID_MAP_SIZE,
+DEFINE_BPF_MAP_GRW(cookie_tag_map, HASH, uint64_t, UidTagValue, COOKIE_UID_MAP_SIZE,
                    AID_NET_BW_ACCT)
-DEFINE_BPF_MAP_GRO(uid_counterset_map, HASH, uint32_t, uint8_t, UID_COUNTERSET_MAP_SIZE,
+DEFINE_BPF_MAP_GRW(uid_counterset_map, HASH, uint32_t, uint8_t, UID_COUNTERSET_MAP_SIZE,
                    AID_NET_BW_ACCT)
-DEFINE_BPF_MAP_GRO(app_uid_stats_map, HASH, uint32_t, StatsValue, APP_STATS_MAP_SIZE,
-                   AID_NET_BW_STATS)
-DEFINE_BPF_MAP_GRW(stats_map_A, HASH, StatsKey, StatsValue, STATS_MAP_SIZE, AID_NET_BW_STATS)
-DEFINE_BPF_MAP_GRW(stats_map_B, HASH, StatsKey, StatsValue, STATS_MAP_SIZE, AID_NET_BW_STATS)
-DEFINE_BPF_MAP_GRO(iface_stats_map, HASH, uint32_t, StatsValue, IFACE_STATS_MAP_SIZE,
-                   AID_NET_BW_STATS)
-DEFINE_BPF_MAP_GRO(configuration_map, HASH, uint32_t, uint8_t, CONFIGURATION_MAP_SIZE,
-                   AID_NET_BW_STATS)
-DEFINE_BPF_MAP(uid_owner_map, HASH, uint32_t, UidOwnerValue, UID_OWNER_MAP_SIZE)
+DEFINE_BPF_MAP_GRW(app_uid_stats_map, HASH, uint32_t, StatsValue, APP_STATS_MAP_SIZE,
+                   AID_NET_BW_ACCT)
+DEFINE_BPF_MAP_GRW(stats_map_A, HASH, StatsKey, StatsValue, STATS_MAP_SIZE, AID_NET_BW_ACCT)
+DEFINE_BPF_MAP_GRW(stats_map_B, HASH, StatsKey, StatsValue, STATS_MAP_SIZE, AID_NET_BW_ACCT)
+DEFINE_BPF_MAP_GRW(iface_stats_map, HASH, uint32_t, StatsValue, IFACE_STATS_MAP_SIZE,
+                   AID_NET_BW_ACCT)
+DEFINE_BPF_MAP_GRW(configuration_map, HASH, uint32_t, uint8_t, CONFIGURATION_MAP_SIZE,
+                   AID_NET_BW_ACCT)
+DEFINE_BPF_MAP_GRW(uid_owner_map, HASH, uint32_t, UidOwnerValue, UID_OWNER_MAP_SIZE,
+                   AID_NET_BW_ACCT)
+DEFINE_BPF_MAP_GRW(uid_permission_map, HASH, uint32_t, uint8_t, UID_OWNER_MAP_SIZE, AID_NET_BW_ACCT)
 
 /* never actually used from ebpf */
-DEFINE_BPF_MAP_GRO(iface_index_name_map, HASH, uint32_t, IfaceValue, IFACE_INDEX_NAME_MAP_SIZE,
-                   AID_NET_BW_STATS)
+DEFINE_BPF_MAP_GRW(iface_index_name_map, HASH, uint32_t, IfaceValue, IFACE_INDEX_NAME_MAP_SIZE,
+                   AID_NET_BW_ACCT)
 
 static __always_inline int is_system_uid(uint32_t uid) {
     return (uid <= MAX_SYSTEM_UID) && (uid >= MIN_SYSTEM_UID);
@@ -228,19 +230,6 @@ static __always_inline inline void update_stats_with_config(struct __sk_buff* sk
 
 static __always_inline inline int bpf_traffic_account(struct __sk_buff* skb, int direction) {
     uint32_t sock_uid = bpf_get_socket_uid(skb);
-    // Always allow and never count clat traffic. Only the IPv4 traffic on the stacked
-    // interface is accounted for and subject to usage restrictions.
-    if (sock_uid == AID_CLAT) {
-        return BPF_PASS;
-    }
-
-    int match = bpf_owner_match(skb, sock_uid, direction);
-    if ((direction == BPF_EGRESS) && (match == BPF_DROP)) {
-        // If an outbound packet is going to be dropped, we do not count that
-        // traffic.
-        return match;
-    }
-
     uint64_t cookie = bpf_get_socket_cookie(skb);
     UidTagValue* utag = bpf_cookie_tag_map_lookup_elem(&cookie);
     uint32_t uid, tag;
@@ -250,6 +239,20 @@ static __always_inline inline int bpf_traffic_account(struct __sk_buff* skb, int
     } else {
         uid = sock_uid;
         tag = 0;
+    }
+
+    // Always allow and never count clat traffic. Only the IPv4 traffic on the stacked
+    // interface is accounted for and subject to usage restrictions.
+    // TODO: remove sock_uid check once Nat464Xlat javaland adds the socket tag AID_CLAT for clat.
+    if (sock_uid == AID_CLAT || uid == AID_CLAT) {
+        return BPF_PASS;
+    }
+
+    int match = bpf_owner_match(skb, sock_uid, direction);
+    if ((direction == BPF_EGRESS) && (match == BPF_DROP)) {
+        // If an outbound packet is going to be dropped, we do not count that
+        // traffic.
+        return match;
     }
 
 // Workaround for secureVPN with VpnIsolation enabled, refer to b/159994981 for details.
@@ -305,8 +308,14 @@ DEFINE_BPF_PROG("skfilter/egress/xtbpf", AID_ROOT, AID_NET_ADMIN, xt_bpf_egress_
     // Clat daemon does not generate new traffic, all its traffic is accounted for already
     // on the v4-* interfaces (except for the 20 (or 28) extra bytes of IPv6 vs IPv4 overhead,
     // but that can be corrected for later when merging v4-foo stats into interface foo's).
+    // TODO: remove sock_uid check once Nat464Xlat javaland adds the socket tag AID_CLAT for clat.
     uint32_t sock_uid = bpf_get_socket_uid(skb);
     if (sock_uid == AID_CLAT) return BPF_NOMATCH;
+    if (sock_uid == AID_SYSTEM) {
+        uint64_t cookie = bpf_get_socket_cookie(skb);
+        UidTagValue* utag = bpf_cookie_tag_map_lookup_elem(&cookie);
+        if (utag && utag->uid == AID_CLAT) return BPF_NOMATCH;
+    }
 
     uint32_t key = skb->ifindex;
     update_iface_stats_map(skb, BPF_EGRESS, &key);
@@ -357,8 +366,6 @@ DEFINE_BPF_PROG("skfilter/denylist/xtbpf", AID_ROOT, AID_NET_ADMIN, xt_bpf_denyl
     if (denylistMatch) return denylistMatch->rule & PENALTY_BOX_MATCH ? BPF_MATCH : BPF_NOMATCH;
     return BPF_NOMATCH;
 }
-
-DEFINE_BPF_MAP(uid_permission_map, HASH, uint32_t, uint8_t, UID_OWNER_MAP_SIZE)
 
 DEFINE_BPF_PROG_KVER("cgroupsock/inet/create", AID_ROOT, AID_ROOT, inet_socket_create,
                      KVER(4, 14, 0))

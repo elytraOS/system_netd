@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#define LOG_TAG "TcUtils"
+
 #include "TcUtils.h"
 
 #include <arpa/inet.h>
@@ -27,7 +29,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define LOG_TAG "TcUtils"
 #include <log/log.h>
 
 #include "NetlinkCommands.h"
@@ -105,7 +106,7 @@ static int sendAndProcessNetlinkResponse(const void* req, int len) {
     int rv = setsockopt(fd, SOL_NETLINK, NETLINK_CAP_ACK, &on, sizeof(on));
     if (rv) ALOGE("setsockopt(fd, SOL_NETLINK, NETLINK_CAP_ACK, %d)", on);
 
-    // this is needed to get sane strace netlink parsing, it allocates the pid
+    // this is needed to get valid strace netlink parsing, it allocates the pid
     rv = bind(fd, (const struct sockaddr*)&KERNEL_NLADDR, sizeof(KERNEL_NLADDR));
     if (rv) {
         const int err = errno;

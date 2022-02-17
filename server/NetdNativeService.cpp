@@ -32,6 +32,7 @@
 #include <cutils/properties.h>
 #include <log/log.h>
 #include <netdutils/DumpWriter.h>
+#include <netdutils/Utils.h>
 #include <utils/Errors.h>
 #include <utils/String16.h>
 
@@ -58,7 +59,9 @@ using android::net::TetherStatsParcel;
 using android::net::UidRangeParcel;
 using android::net::netd::aidl::NativeUidRangeConfig;
 using android::netdutils::DumpWriter;
+using android::netdutils::getIfaceNames;
 using android::netdutils::ScopedIndent;
+using android::netdutils::Status;
 using android::os::ParcelFileDescriptor;
 
 namespace android {
@@ -275,7 +278,7 @@ binder::Status NetdNativeService::firewallReplaceUidChain(const std::string& cha
                                                           const std::vector<int32_t>& uids,
                                                           bool* ret) {
     NETD_LOCKING_RPC(gCtls->firewallCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
-    int err = gCtls->firewallCtrl.replaceUidChain(chainName, isAllowlist, uids);
+    int err = gCtls->trafficCtrl.replaceUidOwnerMap(chainName, isAllowlist, uids);
     *ret = (err == 0);
     return binder::Status::ok();
 }
@@ -319,31 +322,60 @@ binder::Status NetdNativeService::bandwidthSetGlobalAlert(int64_t bytes) {
     return statusFromErrcode(res);
 }
 
+namespace {
+
+int manipulateSpecialApps(const std::vector<uint32_t>& appUids, UidOwnerMatchType matchType,
+                          TrafficController::IptOp op) {
+    Status status = gCtls->trafficCtrl.updateUidOwnerMap(appUids, matchType, op);
+    if (!isOk(status)) {
+        ALOGE("unable to update the Bandwidth Uid Map: %s", toString(status).c_str());
+    }
+    return status.code();
+}
+
+int addNaughtyApps(const std::vector<uint32_t>& appUids) {
+    return manipulateSpecialApps(appUids, PENALTY_BOX_MATCH, TrafficController::IptOpInsert);
+}
+
+int removeNaughtyApps(const std::vector<uint32_t>& appUids) {
+    return manipulateSpecialApps(appUids, PENALTY_BOX_MATCH, TrafficController::IptOpDelete);
+}
+
+int addNiceApps(const std::vector<uint32_t>& appUids) {
+    return manipulateSpecialApps(appUids, HAPPY_BOX_MATCH, TrafficController::IptOpInsert);
+}
+
+int removeNiceApps(const std::vector<uint32_t>& appUids) {
+    return manipulateSpecialApps(appUids, HAPPY_BOX_MATCH, TrafficController::IptOpDelete);
+}
+
+}  // namespace
+
 binder::Status NetdNativeService::bandwidthAddNaughtyApp(int32_t uid) {
     NETD_LOCKING_RPC(gCtls->bandwidthCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
     std::vector<uint32_t> appUids = {static_cast<uint32_t>(abs(uid))};
-    int res = gCtls->bandwidthCtrl.addNaughtyApps(appUids);
+    int res = addNaughtyApps(appUids);
     return statusFromErrcode(res);
 }
 
 binder::Status NetdNativeService::bandwidthRemoveNaughtyApp(int32_t uid) {
     NETD_LOCKING_RPC(gCtls->bandwidthCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
     std::vector<uint32_t> appUids = {static_cast<uint32_t>(abs(uid))};
-    int res = gCtls->bandwidthCtrl.removeNaughtyApps(appUids);
+    int res = removeNaughtyApps(appUids);
     return statusFromErrcode(res);
 }
 
 binder::Status NetdNativeService::bandwidthAddNiceApp(int32_t uid) {
     NETD_LOCKING_RPC(gCtls->bandwidthCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
     std::vector<uint32_t> appUids = {static_cast<uint32_t>(abs(uid))};
-    int res = gCtls->bandwidthCtrl.addNiceApps(appUids);
+    int res = addNiceApps(appUids);
     return statusFromErrcode(res);
 }
 
 binder::Status NetdNativeService::bandwidthRemoveNiceApp(int32_t uid) {
     NETD_LOCKING_RPC(gCtls->bandwidthCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
     std::vector<uint32_t> appUids = {static_cast<uint32_t>(abs(uid))};
-    int res = gCtls->bandwidthCtrl.removeNiceApps(appUids);
+    int res = removeNiceApps(appUids);
     return statusFromErrcode(res);
 }
 
@@ -362,7 +394,8 @@ binder::Status NetdNativeService::networkCreateVpn(int32_t netId, bool secure) {
     // The value of vpnType does not matter here, because it is not used in AOSP and is only
     // implemented by OEMs. Also, the RPC is going to deprecate. Just pick a value defined in INetd
     // as default.
-    int ret = gCtls->netCtrl.createVirtualNetwork(netId, secure, NativeVpnType::LEGACY);
+    int ret = gCtls->netCtrl.createVirtualNetwork(netId, secure, NativeVpnType::LEGACY,
+                                                  false /* excludeLocalRoutes */);
     return statusFromErrcode(ret);
 }
 
@@ -373,7 +406,8 @@ binder::Status NetdNativeService::networkCreate(const NativeNetworkConfig& confi
         ret = gCtls->netCtrl.createPhysicalNetwork(config.netId,
                                                    convertPermission(config.permission));
     } else if (config.networkType == NativeNetworkType::VIRTUAL) {
-        ret = gCtls->netCtrl.createVirtualNetwork(config.netId, config.secure, config.vpnType);
+        ret = gCtls->netCtrl.createVirtualNetwork(config.netId, config.secure, config.vpnType,
+                                                  config.excludeLocalRoutes);
     }
     return statusFromErrcode(ret);
 }
@@ -891,7 +925,7 @@ std::string addCurlyBrackets(const std::string& s) {
 
 binder::Status NetdNativeService::interfaceGetList(std::vector<std::string>* interfaceListResult) {
     NETD_LOCKING_RPC(InterfaceController::mutex, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
-    const auto& ifaceList = InterfaceController::getIfaceNames();
+    const auto& ifaceList = getIfaceNames();
 
     interfaceListResult->clear();
     interfaceListResult->reserve(ifaceList.value().size());
@@ -1209,8 +1243,9 @@ binder::Status NetdNativeService::firewallSetUidRule(int32_t childChain, int32_t
     NETD_LOCKING_RPC(gCtls->firewallCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
     auto chain = static_cast<ChildChain>(childChain);
     auto rule = static_cast<FirewallRule>(firewallRule);
+    FirewallType fType = gCtls->trafficCtrl.getFirewallType(chain);
 
-    int res = gCtls->firewallCtrl.setUidRule(chain, uid, rule);
+    int res = gCtls->trafficCtrl.changeUidOwnerRule(chain, uid, rule, fType);
     return statusFromErrcode(res);
 }
 
@@ -1218,7 +1253,7 @@ binder::Status NetdNativeService::firewallEnableChildChain(int32_t childChain, b
     NETD_LOCKING_RPC(gCtls->firewallCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
     auto chain = static_cast<ChildChain>(childChain);
 
-    int res = gCtls->firewallCtrl.enableChildChains(chain, enable);
+    int res = gCtls->trafficCtrl.toggleUidOwnerMap(chain, enable);
     return statusFromErrcode(res);
 }
 
