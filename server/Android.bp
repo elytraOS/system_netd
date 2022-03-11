@@ -32,7 +32,6 @@ filegroup {
         "TcUtils.cpp",
         "SockDiag.cpp",
         "XfrmController.cpp",
-        "TrafficController.cpp",
     ],
 }
 
@@ -63,7 +62,6 @@ cc_library_static {
         "StrictController.cpp",
         "TcpSocketMonitor.cpp",
         "TetherController.cpp",
-        "TrafficController.cpp",
         "UidRanges.cpp",
         "WakeupController.cpp",
         "XfrmController.cpp",
@@ -211,7 +209,6 @@ cc_test {
         "SockDiagTest.cpp",
         "StrictControllerTest.cpp",
         "TetherControllerTest.cpp",
-        "TrafficControllerTest.cpp",
         "XfrmControllerTest.cpp",
         "WakeupControllerTest.cpp",
     ],
