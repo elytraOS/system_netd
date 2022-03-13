@@ -3130,35 +3130,6 @@ TEST_F(NetdBinderTest, TcpBufferSet) {
     updateAndCheckTcpBuffer(mNetd, rmemValue, wmemValue);
 }
 
-namespace {
-
-void checkUidsInPermissionMap(std::vector<int32_t>& uids, bool exist) {
-    android::bpf::BpfMap<uint32_t, uint8_t> uidPermissionMap(UID_PERMISSION_MAP_PATH);
-    for (int32_t uid : uids) {
-        android::base::Result<uint8_t> permission = uidPermissionMap.readValue(uid);
-        if (exist) {
-            ASSERT_RESULT_OK(permission);
-            EXPECT_EQ(INetd::PERMISSION_NONE, permission.value());
-        } else {
-            ASSERT_FALSE(permission.ok());
-            EXPECT_EQ(ENOENT, permission.error().code());
-        }
-    }
-}
-
-}  // namespace
-
-TEST_F(NetdBinderTest, TestInternetPermission) {
-    std::vector<int32_t> appUids = {TEST_UID1, TEST_UID2};
-
-    mNetd->trafficSetNetPermForUids(INetd::PERMISSION_INTERNET, appUids);
-    checkUidsInPermissionMap(appUids, false);
-    mNetd->trafficSetNetPermForUids(INetd::PERMISSION_NONE, appUids);
-    checkUidsInPermissionMap(appUids, true);
-    mNetd->trafficSetNetPermForUids(INetd::PERMISSION_UNINSTALLED, appUids);
-    checkUidsInPermissionMap(appUids, false);
-}
-
 TEST_F(NetdBinderTest, UnsolEvents) {
     auto testUnsolService = android::net::TestUnsolService::start();
     std::string oldTunName = sTun.name();
@@ -3573,6 +3544,9 @@ void expectVpnLocalExclusionRouteExists(const std::string& ifName) {
                 StringPrintf("%s dev %s proto static scope link", dst, ifName.c_str());
         EXPECT_TRUE(ipRouteExists(IP_RULE_V4, vpnLocalExclusionRoute, tableName));
     }
+    // expect no other rule
+    std::vector<std::string> routes = listIpRoutes(IP_RULE_V4, tableName.c_str());
+    EXPECT_EQ(routes.size(), ARRAY_SIZE(LOCAL_EXCLUSION_ROUTES_V4));
 
     for (size_t i = 0; i < ARRAY_SIZE(LOCAL_EXCLUSION_ROUTES_V6); ++i) {
         const auto& dst = LOCAL_EXCLUSION_ROUTES_V6[i];
@@ -3580,6 +3554,9 @@ void expectVpnLocalExclusionRouteExists(const std::string& ifName) {
                 StringPrintf("%s dev %s proto static", dst, ifName.c_str());
         EXPECT_TRUE(ipRouteExists(IP_RULE_V6, vpnLocalExclusionRoute, tableName));
     }
+    // expect no other rule
+    routes = listIpRoutes(IP_RULE_V6, tableName.c_str());
+    EXPECT_EQ(routes.size(), ARRAY_SIZE(LOCAL_EXCLUSION_ROUTES_V6));
 }
 
 void expectVpnFallthroughWorks(android::net::INetd* netdService, bool bypassable, uid_t uid,
