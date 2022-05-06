@@ -71,7 +71,6 @@ static const in_addr kV4Addr = {inet_addr(kV4AddrString)};
 static const int kV4AddrLen = 29;
 
 using android::base::Result;
-using android::base::StringPrintf;
 using android::base::unique_fd;
 using android::bpf::BpfMap;
 using android::netdutils::DumpWriter;
@@ -215,21 +214,6 @@ void ClatdController::maybeStartBpf(const ClatdTracker& tracker) {
         return;
     }
 
-    // This program will be attached to the v4-* interface which is a TUN and thus always rawip.
-    int rv = getClatEgress4ProgFd(RAWIP);
-    if (rv < 0) {
-        ALOGE("getClatEgress4ProgFd(RAWIP) failure: %s", strerror(-rv));
-        return;
-    }
-    unique_fd txRawIpProgFd(rv);
-
-    rv = getClatIngress6ProgFd(isEthernet.value());
-    if (rv < 0) {
-        ALOGE("getClatIngress6ProgFd(%d) failure: %s", isEthernet.value(), strerror(-rv));
-        return;
-    }
-    unique_fd rxProgFd(rv);
-
     ClatEgress4Key txKey = {
             .iif = tracker.v4ifIndex,
             .local4 = tracker.v4,
@@ -274,7 +258,7 @@ void ClatdController::maybeStartBpf(const ClatdTracker& tracker) {
     // But clat is started before the v4- interface is added to the network. The clat startup have
     // to add clsact of v4- tun interface first for adding bpf filter in maybeStartBpf.
     // TODO: move "qdisc add clsact" of v4- tun interface out from ClatdController.
-    rv = tcQdiscAddDevClsact(tracker.v4ifIndex);
+    int rv = tcQdiscAddDevClsact(tracker.v4ifIndex);
     if (rv) {
         ALOGE("tcQdiscAddDevClsact(%d[%s]) failure: %s", tracker.v4ifIndex, tracker.v4iface,
               strerror(-rv));
@@ -287,7 +271,8 @@ void ClatdController::maybeStartBpf(const ClatdTracker& tracker) {
         return;
     }
 
-    rv = tcFilterAddDevEgressClatIpv4(tracker.v4ifIndex, txRawIpProgFd, RAWIP);
+    // This program will be attached to the v4-* interface which is a TUN and thus always rawip.
+    rv = tcFilterAddDevEgressClatIpv4(tracker.v4ifIndex, CLAT_EGRESS4_PROG_RAWIP_PATH);
     if (rv) {
         ALOGE("tcFilterAddDevEgressClatIpv4(%d[%s], RAWIP) failure: %s", tracker.v4ifIndex,
               tracker.v4iface, strerror(-rv));
@@ -305,7 +290,9 @@ void ClatdController::maybeStartBpf(const ClatdTracker& tracker) {
         return;
     }
 
-    rv = tcFilterAddDevIngressClatIpv6(tracker.ifIndex, rxProgFd, isEthernet.value());
+    std::string rxProgPath =
+            isEthernet.value() ? CLAT_INGRESS6_PROG_ETHER_PATH : CLAT_INGRESS6_PROG_RAWIP_PATH;
+    rv = tcFilterAddDevIngressClatIpv6(tracker.ifIndex, rxProgPath);
     if (rv) {
         ALOGE("tcFilterAddDevIngressClatIpv6(%d[%s], %d) failure: %s", tracker.ifIndex,
               tracker.iface, isEthernet.value(), strerror(-rv));
@@ -328,17 +315,6 @@ void ClatdController::maybeStartBpf(const ClatdTracker& tracker) {
     }
 
     // success
-}
-
-void ClatdController::setIptablesDropRule(bool add, const char* iface, const char* pfx96Str,
-                                          const char* v6Str) {
-    std::string cmd = StringPrintf(
-            "*raw\n"
-            "%s %s -i %s -s %s/96 -d %s -j DROP\n"
-            "COMMIT\n",
-            (add ? "-A" : "-D"), LOCAL_RAW_PREROUTING, iface, pfx96Str, v6Str);
-
-    iptablesRestoreFunction(V6, cmd);
 }
 
 void ClatdController::maybeStopBpf(const ClatdTracker& tracker) {
@@ -817,17 +793,14 @@ int ClatdController::startClatd(const std::string& interface, const std::string&
         return -res;
     }
 
-    // 14. add the drop rule for iptables.
-    setIptablesDropRule(true, tracker.iface, tracker.pfx96String, tracker.v6Str);
-
-    // 15. actually perform vfork/dup2/execve
+    // 14. actually perform vfork/dup2/execve
     res = posix_spawn(&tracker.pid, kClatdPath, &fa, &attr, (char* const*)args, nullptr);
     if (res) {
         ALOGE("posix_spawn failed (%s)", strerror(res));
         return -res;
     }
 
-    // 16. configure eBPF offload - if possible
+    // 15. configure eBPF offload - if possible
     maybeStartBpf(tracker);
 
     mClatdTrackers[interface] = tracker;
@@ -852,7 +825,6 @@ int ClatdController::stopClatd(const std::string& interface) {
 
     ::stopProcess(tracker->pid, "clatd");
 
-    setIptablesDropRule(false, tracker->iface, tracker->pfx96String, tracker->v6Str);
     mClatdTrackers.erase(interface);
 
     ALOGD("clatd on %s stopped", interface.c_str());
